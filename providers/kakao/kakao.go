@@ -1,11 +1,13 @@
-// Package heroku implements the OAuth2 protocol for authenticating users through heroku.
+// Package kakao implements the OAuth2 protocol for authenticating users through kakao.
 // This package can be used as a reference implementation of an OAuth2 provider for Goth.
-package heroku
+package kakao
 
 import (
+	"bytes"
 	"encoding/json"
-	"io"
+	"io/ioutil"
 	"net/http"
+	"strconv"
 
 	"fmt"
 
@@ -14,12 +16,12 @@ import (
 )
 
 const (
-	authURL         string = "https://id.heroku.com/oauth/authorize"
-	tokenURL        string = "https://id.heroku.com/oauth/token"
-	endpointProfile string = "https://api.heroku.com/account"
+	authURL      string = "https://kauth.kakao.com/oauth/authorize"
+	tokenURL     string = "https://kauth.kakao.com/oauth/token"
+	endpointUser string = "https://kapi.kakao.com/v2/user/me"
 )
 
-// Provider is the implementation of `goth.Provider` for accessing Heroku.
+// Provider is the implementation of `goth.Provider` for accessing Kakao.
 type Provider struct {
 	ClientKey    string
 	Secret       string
@@ -29,15 +31,15 @@ type Provider struct {
 	providerName string
 }
 
-// New creates a new Heroku provider and sets up important connection details.
-// You should always call `heroku.New` to get a new provider.  Never try to
+// New creates a new Kakao provider and sets up important connection details.
+// You should always call `kakao.New` to get a new provider.  Never try to
 // create one manually.
 func New(clientKey, secret, callbackURL string, scopes ...string) *Provider {
 	p := &Provider{
 		ClientKey:    clientKey,
 		Secret:       secret,
 		CallbackURL:  callbackURL,
-		providerName: "heroku",
+		providerName: "kakao",
 	}
 	p.config = newConfig(p, scopes)
 	return p
@@ -53,28 +55,29 @@ func (p *Provider) SetName(name string) {
 	p.providerName = name
 }
 
+// Client returns a pointer to http.Client setting some client fallback.
 func (p *Provider) Client() *http.Client {
 	return goth.HTTPClientWithFallBack(p.HTTPClient)
 }
 
-// Debug is a no-op for the heroku package.
+// Debug is a no-op for the kakao package.
 func (p *Provider) Debug(debug bool) {}
 
-// BeginAuth asks Heroku for an authentication end-point.
+// BeginAuth asks kakao for an authentication end-point.
 func (p *Provider) BeginAuth(state string) (goth.Session, error) {
 	return &Session{
 		AuthURL: p.config.AuthCodeURL(state),
 	}, nil
 }
 
-// FetchUser will go to Heroku and access basic information about the user.
+// FetchUser will go to kakao and access basic information about the user.
 func (p *Provider) FetchUser(session goth.Session) (goth.User, error) {
-	s := session.(*Session)
+	sess := session.(*Session)
 	user := goth.User{
-		AccessToken:  s.AccessToken,
+		AccessToken:  sess.AccessToken,
 		Provider:     p.Name(),
-		RefreshToken: s.RefreshToken,
-		ExpiresAt:    s.ExpiresAt,
+		RefreshToken: sess.RefreshToken,
+		ExpiresAt:    sess.ExpiresAt,
 	}
 
 	if user.AccessToken == "" {
@@ -82,26 +85,50 @@ func (p *Provider) FetchUser(session goth.Session) (goth.User, error) {
 		return user, fmt.Errorf("%s cannot get user information without accessToken", p.providerName)
 	}
 
-	req, err := http.NewRequest("GET", endpointProfile, nil)
+	// Get the userID, kakao needs userID in order to get user profile info
+	c := p.Client()
+	req, err := http.NewRequest("GET", endpointUser, nil)
 	if err != nil {
 		return user, err
 	}
-	req.Header.Set("Authorization", "Bearer "+s.AccessToken)
-	req.Header.Set("Accept", "application/vnd.heroku+json; version=3")
-	resp, err := p.Client().Do(req)
+
+	req.Header.Add("Authorization", "Bearer "+sess.AccessToken)
+
+	response, err := c.Do(req)
 	if err != nil {
-		if resp != nil {
-			resp.Body.Close()
+		if response != nil {
+			response.Body.Close()
 		}
 		return user, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return user, fmt.Errorf("%s responded with a %d trying to fetch user information", p.providerName, resp.StatusCode)
+	if response.StatusCode != http.StatusOK {
+		return user, fmt.Errorf("%s responded with a %d trying to fetch user information", p.providerName, response.StatusCode)
 	}
 
-	err = userFromReader(resp.Body, &user)
+	bits, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return user, err
+	}
+
+	u := struct {
+		ID         int `json:"id"`
+		Properties struct {
+			Nickname       string `json:"nickname"`
+			ThumbnailImage string `json:"thumbnail_image"`
+			ProfileImage   string `json:"profile_image"`
+		} `json:"properties"`
+	}{}
+
+	if err = json.NewDecoder(bytes.NewReader(bits)).Decode(&u); err != nil {
+		return user, err
+	}
+
+	id := strconv.Itoa(u.ID)
+
+	user.NickName = u.Properties.Nickname
+	user.AvatarURL = u.Properties.ProfileImage
+	user.UserID = id
 	return user, err
 }
 
@@ -125,34 +152,12 @@ func newConfig(provider *Provider, scopes []string) *oauth2.Config {
 	return c
 }
 
-func userFromReader(r io.Reader, user *goth.User) error {
-	u := struct {
-		Name  string `json:"name"`
-		Email string `json:"email"`
-		ID    string `json:"id"`
-	}{}
-	err := json.NewDecoder(r).Decode(&u)
-	if err != nil {
-		return err
-	}
-	user.Email = u.Email
-	user.Name = u.Name
-	user.UserID = u.ID
-	return nil
-}
-
 //RefreshTokenAvailable refresh token is provided by auth provider or not
 func (p *Provider) RefreshTokenAvailable() bool {
-	return true
+	return false
 }
 
 //RefreshToken get new access token based on the refresh token
 func (p *Provider) RefreshToken(refreshToken string) (*oauth2.Token, error) {
-	token := &oauth2.Token{RefreshToken: refreshToken}
-	ts := p.config.TokenSource(goth.ContextForClient(p.Client()), token)
-	newToken, err := ts.Token()
-	if err != nil {
-		return nil, err
-	}
-	return newToken, err
+	return nil, nil
 }

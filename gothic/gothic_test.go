@@ -166,6 +166,28 @@ func Test_CompleteUserAuthWithSessionDeducedProvider(t *testing.T) {
 	a.Equal(user.Email, "homer@example.com")
 }
 
+func Test_CompleteUserAuthWithContextParamProvider(t *testing.T) {
+	a := assert.New(t)
+
+	res := httptest.NewRecorder()
+	req, err := http.NewRequest("GET", "/auth/callback", nil)
+	a.NoError(err)
+
+	req = GetContextWithProvider(req, "faux")
+
+	sess := faux.Session{Name: "Homer Simpson", Email: "homer@example.com"}
+	session, _ := Store.Get(req, SessionName)
+	session.Values["faux"] = gzipString(sess.Marshal())
+	err = session.Save(req, res)
+	a.NoError(err)
+
+	user, err := CompleteUserAuth(res, req)
+	a.NoError(err)
+
+	a.Equal(user.Name, "Homer Simpson")
+	a.Equal(user.Email, "homer@example.com")
+}
+
 func Test_Logout(t *testing.T) {
 	a := assert.New(t)
 
@@ -217,13 +239,13 @@ func Test_StateValidation(t *testing.T) {
 	session, _ := Store.Get(req, SessionName)
 
 	// Assert that matching states will return a nil error
-	req, err = http.NewRequest("GET", "/auth/callback?provider=faux&state=state_REAL", nil)
+	req, _ = http.NewRequest("GET", "/auth/callback?provider=faux&state=state_REAL", nil)
 	session.Save(req, res)
 	_, err = CompleteUserAuth(res, req)
 	a.NoError(err)
 
 	// Assert that mismatched states will return an error
-	req, err = http.NewRequest("GET", "/auth/callback?provider=faux&state=state_FAKE", nil)
+	req, _ = http.NewRequest("GET", "/auth/callback?provider=faux&state=state_FAKE", nil)
 	session.Save(req, res)
 	_, err = CompleteUserAuth(res, req)
 	a.Error(err)

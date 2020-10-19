@@ -1,17 +1,17 @@
-package naver_test
+package strava_test
 
 import (
 	"testing"
 
 	"github.com/markbates/goth"
-	"github.com/markbates/goth/providers/naver"
+	"github.com/markbates/goth/providers/strava"
 	"github.com/stretchr/testify/assert"
 )
 
 func Test_Implements_Session(t *testing.T) {
 	t.Parallel()
 	a := assert.New(t)
-	s := &naver.Session{}
+	s := &strava.Session{}
 
 	a.Implements((*goth.Session)(nil), s)
 }
@@ -19,7 +19,7 @@ func Test_Implements_Session(t *testing.T) {
 func Test_GetAuthURL(t *testing.T) {
 	t.Parallel()
 	a := assert.New(t)
-	s := &naver.Session{}
+	s := &strava.Session{}
 
 	_, err := s.GetAuthURL()
 	a.Error(err)
@@ -33,21 +33,16 @@ func Test_GetAuthURL(t *testing.T) {
 func Test_ToJSON(t *testing.T) {
 	t.Parallel()
 	a := assert.New(t)
-	s := &naver.Session{
-		AuthURL:     "https://nid.naver.com/oauth2.0/authorize",
-		AccessToken: "1234567890",
-	}
+	s := &strava.Session{}
+
 	data := s.Marshal()
-	a.Equal(`{"AuthURL":"https://nid.naver.com/oauth2.0/authorize","AccessToken":"1234567890","RefreshToken":"","ExpiresAt":"0001-01-01T00:00:00Z"}`, data)
+	a.Equal(data, `{"AuthURL":"","AccessToken":"","RefreshToken":"","ExpiresAt":"0001-01-01T00:00:00Z"}`)
 }
 
 func Test_String(t *testing.T) {
 	t.Parallel()
 	a := assert.New(t)
-	s := &naver.Session{
-		AuthURL:     "https://nid.naver.com/oauth2.0/authorize",
-		AccessToken: "1234567890",
-	}
+	s := &strava.Session{}
 
 	a.Equal(s.String(), s.Marshal())
 }

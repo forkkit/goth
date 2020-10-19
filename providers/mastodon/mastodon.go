@@ -1,25 +1,26 @@
-// Package heroku implements the OAuth2 protocol for authenticating users through heroku.
+// Package mastodon implements the OAuth2 protocol for authenticating users through Mastodon.
 // This package can be used as a reference implementation of an OAuth2 provider for Goth.
-package heroku
+package mastodon
 
 import (
+	"bytes"
 	"encoding/json"
-	"io"
-	"net/http"
-
 	"fmt"
+	"io"
+	"io/ioutil"
+	"net/http"
+	"strings"
 
 	"github.com/markbates/goth"
 	"golang.org/x/oauth2"
 )
 
-const (
-	authURL         string = "https://id.heroku.com/oauth/authorize"
-	tokenURL        string = "https://id.heroku.com/oauth/token"
-	endpointProfile string = "https://api.heroku.com/account"
+// Mastodon.social is the flagship instance of mastodon
+var (
+	InstanceURL = "https://mastodon.social/"
 )
 
-// Provider is the implementation of `goth.Provider` for accessing Heroku.
+// Provider is the implementation of `goth.Provider` for accessing Mastodon.
 type Provider struct {
 	ClientKey    string
 	Secret       string
@@ -27,19 +28,32 @@ type Provider struct {
 	HTTPClient   *http.Client
 	config       *oauth2.Config
 	providerName string
+	authURL      string
+	tokenURL     string
+	profileURL   string
 }
 
-// New creates a new Heroku provider and sets up important connection details.
-// You should always call `heroku.New` to get a new provider.  Never try to
+// New creates a new Mastodon provider and sets up important connection details.
+// You should always call `mastodon.New` to get a new provider.  Never try to
 // create one manually.
 func New(clientKey, secret, callbackURL string, scopes ...string) *Provider {
+	return NewCustomisedURL(clientKey, secret, callbackURL, InstanceURL, scopes...)
+}
+
+// NewCustomisedURL is similar to New(...) but can be used to set custom URLs to connect to
+func NewCustomisedURL(clientKey, secret, callbackURL, instanceURL string, scopes ...string) *Provider {
+	instanceURL = fmt.Sprintf("%s/", strings.TrimSuffix(instanceURL, "/"))
+	profileURL := fmt.Sprintf("%sapi/v1/accounts/verify_credentials", instanceURL)
+	authURL := fmt.Sprintf("%soauth/authorize", instanceURL)
+	tokenURL := fmt.Sprintf("%soauth/token", instanceURL)
 	p := &Provider{
 		ClientKey:    clientKey,
 		Secret:       secret,
 		CallbackURL:  callbackURL,
-		providerName: "heroku",
+		providerName: "mastodon",
+		profileURL:   profileURL,
 	}
-	p.config = newConfig(p, scopes)
+	p.config = newConfig(p, authURL, tokenURL, scopes)
 	return p
 }
 
@@ -57,24 +71,24 @@ func (p *Provider) Client() *http.Client {
 	return goth.HTTPClientWithFallBack(p.HTTPClient)
 }
 
-// Debug is a no-op for the heroku package.
+// Debug is a no-op for the Mastodon package.
 func (p *Provider) Debug(debug bool) {}
 
-// BeginAuth asks Heroku for an authentication end-point.
+// BeginAuth asks Mastodon for an authentication end-point.
 func (p *Provider) BeginAuth(state string) (goth.Session, error) {
 	return &Session{
 		AuthURL: p.config.AuthCodeURL(state),
 	}, nil
 }
 
-// FetchUser will go to Heroku and access basic information about the user.
+// FetchUser will go to Mastodon and access basic information about the user.
 func (p *Provider) FetchUser(session goth.Session) (goth.User, error) {
-	s := session.(*Session)
+	sess := session.(*Session)
 	user := goth.User{
-		AccessToken:  s.AccessToken,
+		AccessToken:  sess.AccessToken,
 		Provider:     p.Name(),
-		RefreshToken: s.RefreshToken,
-		ExpiresAt:    s.ExpiresAt,
+		RefreshToken: sess.RefreshToken,
+		ExpiresAt:    sess.ExpiresAt,
 	}
 
 	if user.AccessToken == "" {
@@ -82,30 +96,38 @@ func (p *Provider) FetchUser(session goth.Session) (goth.User, error) {
 		return user, fmt.Errorf("%s cannot get user information without accessToken", p.providerName)
 	}
 
-	req, err := http.NewRequest("GET", endpointProfile, nil)
+	req, err := http.NewRequest("GET", p.profileURL, nil)
 	if err != nil {
 		return user, err
 	}
-	req.Header.Set("Authorization", "Bearer "+s.AccessToken)
-	req.Header.Set("Accept", "application/vnd.heroku+json; version=3")
-	resp, err := p.Client().Do(req)
+
+	req.Header.Add("Authorization", "Bearer "+sess.AccessToken)
+	response, err := p.Client().Do(req)
 	if err != nil {
-		if resp != nil {
-			resp.Body.Close()
-		}
 		return user, err
 	}
-	defer resp.Body.Close()
+	defer response.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return user, fmt.Errorf("%s responded with a %d trying to fetch user information", p.providerName, resp.StatusCode)
+	if response.StatusCode != http.StatusOK {
+		return user, fmt.Errorf("%s responded with a %d trying to fetch user information", p.providerName, response.StatusCode)
 	}
 
-	err = userFromReader(resp.Body, &user)
+	bits, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return user, err
+	}
+
+	err = json.NewDecoder(bytes.NewReader(bits)).Decode(&user.RawData)
+	if err != nil {
+		return user, err
+	}
+
+	err = userFromReader(bytes.NewReader(bits), &user)
+
 	return user, err
 }
 
-func newConfig(provider *Provider, scopes []string) *oauth2.Config {
+func newConfig(provider *Provider, authURL, tokenURL string, scopes []string) *oauth2.Config {
 	c := &oauth2.Config{
 		ClientID:     provider.ClientKey,
 		ClientSecret: provider.Secret,
@@ -127,17 +149,22 @@ func newConfig(provider *Provider, scopes []string) *oauth2.Config {
 
 func userFromReader(r io.Reader, user *goth.User) error {
 	u := struct {
-		Name  string `json:"name"`
-		Email string `json:"email"`
-		ID    string `json:"id"`
+		Name      string `json:"display_name"`
+		NickName  string `json:"username"`
+		ID        string `json:"id"`
+		AvatarURL string `json:"avatar"`
 	}{}
 	err := json.NewDecoder(r).Decode(&u)
 	if err != nil {
 		return err
 	}
-	user.Email = u.Email
 	user.Name = u.Name
+	if len(user.Name) == 0 {
+		user.Name = u.NickName
+	}
+	user.NickName = u.NickName
 	user.UserID = u.ID
+	user.AvatarURL = u.AvatarURL
 	return nil
 }
 
